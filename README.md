@@ -6,39 +6,29 @@ Experiment-first swing-trading research application for Indian equities and ETFs
 - Long-only delivery swing trades
 - No leverage, F&O, averaging down, or blind AI predictions
 - Human approval before any broker order
-- LIVE portfolio capped by available capital; SHADOW/PAPER portfolio tracks otherwise valid setups
-- System can and should return **NO TRADE**
-- Every trade has a predefined stop and target
-- Initial capital: ₹1,000; initial max live positions: 1
+- LIVE portfolio capped by available capital; SHADOW/PAPER tracks otherwise valid setups
+- The system can and should return **NO TRADE**
+- Initial experiment capital: ₹1,000
 
-## V1 architecture
-Market data → technical scanner → event filter → rule-based score → risk engine → LIVE/PAPER/NO_TRADE → PostgreSQL journal → human review → outcome comparison.
+## Current pipeline
+Market data → Nifty 200 scanner → earnings/event filter → deterministic score/risk engine → LIVE/PAPER/NO_TRADE → PostgreSQL journal → automatic simulated outcome tracking → human review.
 
-## Included now
-- FastAPI API and Nifty 200 daily scanner
-- Configurable earnings/company-event exclusion window
-- Conservative block when event data is unavailable (configurable)
-- Manual corporate-event CSV fallback plus yfinance research event adapter
-- PostgreSQL/SQLAlchemy experiment journal
-- Automatic idempotent persistence of every evaluated recommendation in each scan snapshot
-- Outcome review fields: actual entry/exit, P&L, return, realized R, MAE/MFE, stop/target flags, rule violations, chart reference and decision-quality label
-- Basic predicted-decision vs reviewed-outcome comparison endpoint
-- Human approval remains required; no broker auto-trading
+## Implemented
+- FastAPI backend and Nifty 200 daily scanner
+- EMA20 / DMA50 / DMA200 trend filter, consolidation breakout, volume, liquidity, ATR stop and targets
+- Configurable earnings/company-event exclusion with manual CSV fallback
+- PostgreSQL/SQLAlchemy experiment journal with idempotent scan snapshots
+- Automatic tracking for saved LIVE/PAPER signals using subsequent daily OHLC data
+- Simulated entry, stop, Target 1, time exit, MAE, MFE, R multiple, holding sessions and P&L
+- PAPER and simulated-LIVE summary metrics
+- Manual actual-trade outcome fields remain separate from simulated results
+- No broker auto-trading
 
-## Start PostgreSQL
+## PostgreSQL
 ```bash
 docker compose up -d postgres
 ```
-Default database URL: `postgresql+psycopg://swing:swing@localhost:5432/swing_trading`
-
-Copy `.env.example` values into your environment as needed. Journal persistence is required by default so experiment signals are not silently lost.
-
-## Corporate event filter
-Default policy: avoid new entries 3 business days before and 1 business day after a known results/company-event date. If automatic event data is unavailable, an otherwise actionable trade is blocked by default. The V1 business-day window is a Monday–Friday approximation; use an NSE holiday-aware exchange calendar before production use.
-
-`EVENT_PROVIDER` modes: `composite` (default), `manual`, `yfinance`, or `disabled`.
-
-For manual verified dates, copy `backend/data/corporate_events.example.csv` to `backend/data/corporate_events.csv` and replace examples with verified dates. The real local calendar is gitignored.
+Default URL: `postgresql+psycopg://swing:swing@localhost:5432/swing_trading`
 
 ## Run backend
 ```bash
@@ -49,29 +39,49 @@ python -m venv .venv
 pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
-Open API docs: `http://127.0.0.1:8000/docs`
+Open `http://127.0.0.1:8000/docs`.
 
-## Scan and auto-journal
+## Daily scan
 ```text
-GET /scan/nifty200?capital=1000&max_rupee_risk=10&limit=20&event_days_before=3&event_days_after=1&event_unknown_blocks_trade=true
+GET /scan/nifty200?capital=1000&max_rupee_risk=10&limit=20
 ```
-Every evaluated proposal is persisted before the response is considered successful when `JOURNAL_REQUIRED=true`. Exact repeated snapshots are deduplicated by fingerprint to prevent double counting.
+The scan journals the full evaluated snapshot. With `AUTO_REFRESH_OUTCOMES=true` it also refreshes older non-terminal LIVE/PAPER simulations in the same request.
 
-## Journal API
+## Automatic outcome model
+Defaults are configurable in `.env.example`:
+- Entry is considered only from the first session after the signal, avoiding same-close lookahead.
+- Entry zone remains valid for 3 post-signal sessions.
+- If price gaps above the entry zone and never trades back into it, the system does not chase.
+- Target 1 is the deterministic full simulated exit because no partial-exit rule has been defined yet.
+- Maximum holding period is 20 trading sessions; otherwise exit at that session's close.
+- If a daily candle touches both stop and target, stop is assumed first (pessimistic handling of unknown intraday order).
+- An intraday-triggered entry receives no same-bar target credit.
+- Simulated outcomes never overwrite manually entered actual LIVE fills.
+
+Simulation statuses include `PENDING_ENTRY`, `OPEN`, `TARGET1`, `STOPPED`, `TIME_EXIT`, `ENTRY_EXPIRED`, and `NO_DATA`.
+
+## Outcome API
+```text
+POST /outcomes/refresh
+GET  /outcomes/simulations?classification=PAPER
+GET  /outcomes/summary
+```
+`/outcomes/summary` reports tracked/closed/open counts, entry expiries, wins/losses, win rate, simulated P&L, average return, average R and profit factor separately for PAPER and simulated LIVE signals.
+
+Existing journal endpoints remain available:
 ```text
 GET   /journal/runs
 GET   /journal/signals
 PATCH /journal/signals/{signal_id}/outcome
 GET   /journal/comparison
 ```
-The outcome endpoint stores actual execution/outcome data and computes realized P&L, percentage return, R multiple and holding period. `decision_was_correct` is an explicit post-trade review label, not an AI probability or guaranteed-performance metric.
 
-## Run tests
+## Tests
 ```bash
 cd backend
 pytest -q
 ```
-The suite covers the engine, scanner, event blocking and journal persistence/outcome calculations.
+Outcome tests cover next-session fills, no-chase entry expiry, pessimistic same-bar handling, time exits, persistence and paper summary calculations.
 
 ## Important
-This repository is for research/education and experiment tracking. It is not financial advice and does not promise profitable outcomes. `yfinance` remains a research adapter, not an exchange-grade execution feed. Transaction costs, slippage, taxes/charges, corporate actions, survivorship bias and better event-data quality must be included before treating results as evidence of a repeatable edge.
+This is research/education software, not financial advice and not a promise of profit. The automatic results are daily-bar simulations, not actual broker fills. yfinance is still a research adapter. Transaction costs, slippage, taxes/charges, corporate actions, exchange holiday calendars and licensed market/event data should be incorporated before treating results as evidence of a repeatable edge.
