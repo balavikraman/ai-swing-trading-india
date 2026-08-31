@@ -1,3 +1,4 @@
+from datetime import date
 from enum import Enum
 from pydantic import BaseModel, Field
 
@@ -12,6 +13,13 @@ class MarketRegime(str, Enum):
     BULLISH = "BULLISH"
     NEUTRAL = "NEUTRAL"
     BEARISH = "BEARISH"
+
+
+class EventDataStatus(str, Enum):
+    NOT_CHECKED = "NOT_CHECKED"
+    AVAILABLE = "AVAILABLE"
+    MANUAL = "MANUAL"
+    UNAVAILABLE = "UNAVAILABLE"
 
 
 class CandidateInput(BaseModel):
@@ -30,7 +38,10 @@ class CandidateInput(BaseModel):
     stop_loss: float = Field(gt=0)
     target1: float = Field(gt=0)
     target2: float | None = Field(default=None, gt=0)
+    signal_date: date | None = None
     major_event_nearby: bool = False
+    event_reason: str | None = None
+    event_data_status: EventDataStatus = EventDataStatus.NOT_CHECKED
     liquid: bool = True
     gap_pct_above_breakout: float = Field(default=0, ge=0)
     market_regime: MarketRegime = MarketRegime.NEUTRAL
@@ -43,11 +54,15 @@ class ExperimentConfig(BaseModel):
     min_score_for_trade: float = Field(default=80, ge=0, le=100)
     max_gap_pct: float = Field(default=2.0, ge=0)
     max_live_positions: int = Field(default=1, ge=1)
+    event_days_before: int = Field(default=3, ge=0, le=30)
+    event_days_after: int = Field(default=1, ge=0, le=30)
+    event_unknown_blocks_trade: bool = True
 
 
 class TradeProposal(BaseModel):
     symbol: str
     name: str
+    signal_date: date | None = None
     current_price: float
     setup_type: str
     entry_zone_low: float
@@ -61,7 +76,29 @@ class TradeProposal(BaseModel):
     potential_reward: float
     risk_reward_ratio: float
     ai_score: float
+    score_components: dict[str, float] = Field(default_factory=dict)
     classification: PortfolioType
     technical_reason: str
     market_reason: str
     decision_reason: str
+    event_risk: bool = False
+    event_reason: str | None = None
+    event_data_status: EventDataStatus = EventDataStatus.NOT_CHECKED
+
+
+class OutcomeUpdate(BaseModel):
+    actual_entry: float | None = Field(default=None, gt=0)
+    actual_entry_date: date | None = None
+    actual_quantity: int | None = Field(default=None, gt=0)
+    actual_exit: float | None = Field(default=None, gt=0)
+    actual_exit_date: date | None = None
+    maximum_adverse_excursion: float | None = None
+    maximum_favorable_excursion: float | None = None
+    stop_hit: bool | None = None
+    target_hit: bool | None = None
+    followed_system: bool | None = None
+    rule_violation: str | None = None
+    chart_reference: str | None = None
+    expected_thesis_met: bool | None = None
+    decision_was_correct: bool | None = None
+    outcome_notes: str | None = None

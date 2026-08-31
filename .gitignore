@@ -6,3 +6,5 @@ __pycache__/
 node_modules/
 .next/
 .DS_Store
+backend/data/corporate_events.csv
+*.db
