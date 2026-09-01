@@ -1,98 +1,181 @@
 import os
 from functools import lru_cache
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 
+from .backtest import BacktestCostModel, backtest_symbol
+from .benchmarks import benchmark_snapshot
+from .broker import ZerodhaReadOnlyClient
 from .engine import build_trade_proposal, score_candidate
-from .events import build_event_provider_from_env
+from .intelligence_store import latest_market_context, list_intelligence
 from .journal import JournalService
 from .market_data import YFinanceMarketDataProvider
 from .models import CandidateInput, ExperimentConfig, OutcomeUpdate
 from .outcomes import OutcomeTracker, SimulationConfig, list_simulations, simulation_summary
-from .scanner import scan_universe
-from .universe import load_nifty_200
+from .performance import performance_from_simulation_rows
+from .pipeline import env_bool, run_daily_pipeline
 
-app = FastAPI(title="AI-Assisted Swing Trading India", version="0.4.0", description="Experiment-first research API. Human approval required; no auto-trading.")
+load_dotenv()
+
+app = FastAPI(title="AI-Assisted Swing Trading India", version="0.5.0", description="Experiment-first market research platform. Human approval required; no auto-trading.")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[item.strip() for item in os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",") if item.strip()],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 @lru_cache(maxsize=1)
-def get_journal() -> JournalService: return JournalService()
+def get_journal() -> JournalService:
+    return JournalService()
 
-def _env_bool(name: str, default: bool) -> bool:
-    value=os.getenv(name)
-    if value is None: return default
-    return value.strip().lower() in {"1","true","yes","on"}
 
-def _simulation_config(entry_valid_sessions:int|None=None,max_holding_sessions:int|None=None,history_period:str|None=None)->SimulationConfig:
-    return SimulationConfig(entry_valid_sessions=entry_valid_sessions or int(os.getenv("OUTCOME_ENTRY_VALID_SESSIONS","3")),max_holding_sessions=max_holding_sessions or int(os.getenv("OUTCOME_MAX_HOLDING_SESSIONS","20")),history_period=history_period or os.getenv("OUTCOME_HISTORY_PERIOD","2y"))
+def simulation_config(entry=None, hold=None, period=None) -> SimulationConfig:
+    return SimulationConfig(entry_valid_sessions=entry or int(os.getenv("OUTCOME_ENTRY_VALID_SESSIONS", "3")), max_holding_sessions=hold or int(os.getenv("OUTCOME_MAX_HOLDING_SESSIONS", "20")), history_period=period or os.getenv("OUTCOME_HISTORY_PERIOD", "2y"))
+
 
 @app.get("/health")
 def health():
-    journal_ok=False; journal_error=None
-    try: get_journal().ping(); journal_ok=True
-    except Exception as exc: journal_error=str(exc)
-    return {"status":"ok" if journal_ok else "degraded","mode":"research","auto_trading":False,"journal_connected":journal_ok,"journal_error":journal_error}
+    journal_ok = False
+    journal_error = None
+    try:
+        get_journal().ping()
+        journal_ok = True
+    except Exception as exc:
+        journal_error = str(exc)
+    broker = ZerodhaReadOnlyClient().status()
+    return {"status": "ok" if journal_ok else "degraded", "mode": "research", "auto_trading": False, "journal_connected": journal_ok, "journal_error": journal_error, "zerodha": broker.__dict__, "openai_configured": bool(os.getenv("OPENAI_API_KEY")), "telegram_configured": bool(os.getenv("TELEGRAM_BOT_TOKEN") and os.getenv("TELEGRAM_CHAT_ID"))}
+
 
 @app.post("/score")
 def score(candidate: CandidateInput):
-    total,components=score_candidate(candidate); return {"score":total,"components":components}
+    total, components = score_candidate(candidate)
+    return {"score": total, "components": components}
+
 
 @app.post("/proposal")
-def proposal(candidate: CandidateInput, capital: float=1000, max_rupee_risk: float=10):
-    return build_trade_proposal(candidate,ExperimentConfig(capital=capital,max_rupee_risk=max_rupee_risk))
+def proposal(candidate: CandidateInput, capital: float = 1000, max_rupee_risk: float = 10):
+    return build_trade_proposal(candidate, ExperimentConfig(capital=capital, max_rupee_risk=max_rupee_risk))
 
+
+@app.post("/scan/nifty200")
 @app.get("/scan/nifty200")
-def scan_nifty200(capital:float=1000,max_rupee_risk:float=10,limit:int=20,event_days_before:int=Query(default=int(os.getenv("EVENT_DAYS_BEFORE","3")),ge=0,le=30),event_days_after:int=Query(default=int(os.getenv("EVENT_DAYS_AFTER","1")),ge=0,le=30),event_unknown_blocks_trade:bool=Query(default=_env_bool("EVENT_UNKNOWN_BLOCKS_TRADE",True))):
+def scan_nifty200(capital: float = 1000, max_rupee_risk: float = 10, limit: int = Query(default=20, ge=1, le=200), event_days_before: int = Query(default=int(os.getenv("EVENT_DAYS_BEFORE", "3")), ge=0, le=30), event_days_after: int = Query(default=int(os.getenv("EVENT_DAYS_AFTER", "1")), ge=0, le=30), event_unknown_blocks_trade: bool = Query(default=env_bool("EVENT_UNKNOWN_BLOCKS_TRADE", True)), enrich_news: bool = True, send_telegram: bool = False):
     try:
-        members=load_nifty_200(); cfg=ExperimentConfig(capital=capital,max_rupee_risk=max_rupee_risk,event_days_before=event_days_before,event_days_after=event_days_after,event_unknown_blocks_trade=event_unknown_blocks_trade)
-        market_provider=YFinanceMarketDataProvider(); event_provider=build_event_provider_from_env(); result=scan_universe(market_provider,members,cfg,event_provider=event_provider)
-        run_id=None; journal_saved=False; journal_error=None
-        try: run_id,journal_saved=get_journal().save_scan(result,"NIFTY_200",market_provider.name,event_provider.name,cfg)
-        except Exception as exc:
-            journal_error=str(exc)
-            if _env_bool("JOURNAL_REQUIRED",True): raise RuntimeError(f"scanner results were not journaled: {exc}") from exc
-        outcome_refresh=None
-        if _env_bool("AUTO_REFRESH_OUTCOMES",True) and run_id is not None:
-            try: outcome_refresh=OutcomeTracker(get_journal(),market_provider,_simulation_config()).refresh(limit=int(os.getenv("OUTCOME_REFRESH_LIMIT","200")))
-            except Exception as exc: outcome_refresh={"error":str(exc),"non_fatal":True}
-        ranked=result.proposals[:max(1,min(limit,200))]
-        return {"universe":"NIFTY_200","signal_date":result.signal_date,"market_regime":result.market_regime,"data_provider":market_provider.name,"event_provider":event_provider.name,"human_approval_required":True,"auto_trading":False,"journal_run_id":run_id,"journal_saved_new_snapshot":journal_saved,"journal_error":journal_error,"outcome_refresh":outcome_refresh,"count":len(ranked),"total_evaluated":len(result.proposals),"candidates":ranked,"skipped_count":len(result.skipped)}
-    except Exception as exc: raise HTTPException(status_code=503,detail=f"scan unavailable: {exc}") from exc
+        return run_daily_pipeline(get_journal(), capital, max_rupee_risk, limit, send_telegram, enrich_news, event_days_before, event_days_after, event_unknown_blocks_trade)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"scan unavailable: {exc}") from exc
+
 
 @app.get("/journal/runs")
-def journal_runs(limit:int=30):
-    try: return get_journal().list_runs(limit)
-    except Exception as exc: raise HTTPException(status_code=503,detail=f"journal unavailable: {exc}") from exc
+def journal_runs(limit: int = 30):
+    try:
+        return get_journal().list_runs(limit)
+    except Exception as exc:
+        raise HTTPException(503, f"journal unavailable: {exc}")
+
 
 @app.get("/journal/signals")
-def journal_signals(limit:int=100,symbol:str|None=None,classification:str|None=None):
-    try: return get_journal().list_signals(limit,symbol,classification)
-    except Exception as exc: raise HTTPException(status_code=503,detail=f"journal unavailable: {exc}") from exc
+def journal_signals(limit: int = 100, symbol: str | None = None, classification: str | None = None):
+    try:
+        return get_journal().list_signals(limit, symbol, classification)
+    except Exception as exc:
+        raise HTTPException(503, f"journal unavailable: {exc}")
+
 
 @app.patch("/journal/signals/{signal_id}/outcome")
-def update_signal_outcome(signal_id:int,update:OutcomeUpdate):
+def update_outcome(signal_id: int, update: OutcomeUpdate):
     try:
-        result=get_journal().update_outcome(signal_id,update)
-        if result is None: raise HTTPException(status_code=404,detail="signal not found")
-        return result
-    except HTTPException: raise
-    except Exception as exc: raise HTTPException(status_code=503,detail=f"journal unavailable: {exc}") from exc
+        row = get_journal().update_outcome(signal_id, update)
+        if row is None:
+            raise HTTPException(404, "signal not found")
+        return row
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(503, f"journal unavailable: {exc}")
+
 
 @app.get("/journal/comparison")
 def journal_comparison():
-    try: return get_journal().comparison_summary()
-    except Exception as exc: raise HTTPException(status_code=503,detail=f"journal unavailable: {exc}") from exc
+    return get_journal().comparison_summary()
+
 
 @app.post("/outcomes/refresh")
-def refresh_outcomes(limit:int=Query(default=200,ge=1,le=1000),entry_valid_sessions:int=Query(default=int(os.getenv("OUTCOME_ENTRY_VALID_SESSIONS","3")),ge=1,le=10),max_holding_sessions:int=Query(default=int(os.getenv("OUTCOME_MAX_HOLDING_SESSIONS","20")),ge=1,le=60),history_period:str=Query(default=os.getenv("OUTCOME_HISTORY_PERIOD","2y"),pattern="^(3mo|6mo|1y|2y|5y|max)$")):
-    try: return OutcomeTracker(get_journal(),YFinanceMarketDataProvider(),_simulation_config(entry_valid_sessions,max_holding_sessions,history_period)).refresh(limit)
-    except Exception as exc: raise HTTPException(status_code=503,detail=f"outcome refresh unavailable: {exc}") from exc
+def refresh_outcomes(limit: int = Query(default=200, ge=1, le=1000), entry_valid_sessions: int = Query(default=3, ge=1, le=10), max_holding_sessions: int = Query(default=20, ge=1, le=60), history_period: str = Query(default="2y", pattern="^(3mo|6mo|1y|2y|5y|max)$")):
+    try:
+        return OutcomeTracker(get_journal(), YFinanceMarketDataProvider(), simulation_config(entry_valid_sessions, max_holding_sessions, history_period)).refresh(limit)
+    except Exception as exc:
+        raise HTTPException(503, f"outcome refresh unavailable: {exc}")
+
 
 @app.get("/outcomes/simulations")
-def outcome_simulations(limit:int=Query(default=100,ge=1,le=1000),classification:str|None=None,status:str|None=None):
-    try: return list_simulations(get_journal(),limit,classification,status)
-    except Exception as exc: raise HTTPException(status_code=503,detail=f"outcome simulations unavailable: {exc}") from exc
+def simulations(limit: int = 100, classification: str | None = None, status: str | None = None):
+    return list_simulations(get_journal(), limit, classification, status)
+
 
 @app.get("/outcomes/summary")
-def outcome_summary():
-    try: return simulation_summary(get_journal())
-    except Exception as exc: raise HTTPException(status_code=503,detail=f"outcome summary unavailable: {exc}") from exc
+def outcomes_summary():
+    return simulation_summary(get_journal())
+
+
+@app.get("/performance")
+def performance():
+    paper = list_simulations(get_journal(), 1000, "PAPER")
+    live = list_simulations(get_journal(), 1000, "LIVE")
+    return {"paper": performance_from_simulation_rows(paper), "live_simulated": performance_from_simulation_rows(live), "note": "Simulation performance is not actual broker execution and excludes taxes/slippage unless explicitly modeled in backtests."}
+
+
+@app.get("/intelligence/latest")
+def intelligence_latest(limit: int = 50):
+    return list_intelligence(get_journal(), limit)
+
+
+@app.get("/benchmarks/snapshot")
+def benchmarks():
+    return benchmark_snapshot(ZerodhaReadOnlyClient())
+
+
+@app.get("/broker/status")
+def broker_status():
+    return ZerodhaReadOnlyClient().status().__dict__
+
+
+@app.get("/broker/holdings")
+def broker_holdings():
+    try:
+        return ZerodhaReadOnlyClient().holdings()
+    except Exception as exc:
+        raise HTTPException(503, f"Zerodha holdings unavailable: {exc}")
+
+
+@app.get("/broker/positions")
+def broker_positions():
+    try:
+        return ZerodhaReadOnlyClient().positions()
+    except Exception as exc:
+        raise HTTPException(503, f"Zerodha positions unavailable: {exc}")
+
+
+@app.get("/backtest/{symbol}")
+def backtest(symbol: str, period: str = Query(default="5y", pattern="^(1y|2y|5y|max)$"), max_holding_sessions: int = Query(default=20, ge=1, le=60), entry_valid_sessions: int = Query(default=3, ge=1, le=10)):
+    try:
+        return backtest_symbol(YFinanceMarketDataProvider(), symbol.strip().upper(), ExperimentConfig(), period, max_holding_sessions, entry_valid_sessions, BacktestCostModel.from_env())
+    except Exception as exc:
+        raise HTTPException(503, f"backtest unavailable: {exc}")
+
+
+@app.get("/dashboard/overview")
+def dashboard_overview():
+    try:
+        signals = get_journal().list_signals(30)
+        intelligence = list_intelligence(get_journal(), 20)
+        paper = list_simulations(get_journal(), 1000, "PAPER")
+        live = list_simulations(get_journal(), 1000, "LIVE")
+        return {"market_context": latest_market_context(get_journal()), "signals": signals, "intelligence": intelligence, "outcomes": simulation_summary(get_journal()), "performance": {"paper": performance_from_simulation_rows(paper), "live_simulated": performance_from_simulation_rows(live)}, "benchmarks": benchmark_snapshot(ZerodhaReadOnlyClient()), "broker": ZerodhaReadOnlyClient().status().__dict__, "configuration": {"capital": 1000, "max_live_positions": 1, "max_rupee_risk": 10, "min_score": 80, "min_rr": 2, "auto_trading": False}}
+    except Exception as exc:
+        raise HTTPException(503, f"dashboard unavailable: {exc}")
