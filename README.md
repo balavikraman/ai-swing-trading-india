@@ -1,87 +1,80 @@
 # AI-Assisted Swing Trading — India
 
-Experiment-first swing-trading research application for Indian equities and ETFs.
+Local-first research platform for long-only Indian equity/ETF swing trading. The product is designed to test whether a repeatable edge exists; it does **not** promise profits and it does not auto-trade.
 
-## Principles
-- Long-only delivery swing trades
-- No leverage, F&O, averaging down, or blind AI predictions
-- Human approval before any broker order
-- LIVE portfolio capped by available capital; SHADOW/PAPER tracks otherwise valid setups
-- The system can and should return **NO TRADE**
-- Initial experiment capital: ₹1,000
+## Current architecture
+**Nifty 200 daily data → strict technical scanner → market breadth / relative strength → earnings-event veto → LIVE/PAPER/NO_TRADE → PostgreSQL journal → current-news intelligence for shortlist → simulated outcome tracking → performance/backtest → dashboard / Telegram → human decision.**
 
-## Current pipeline
-Market data → Nifty 200 scanner → earnings/event filter → deterministic score/risk engine → LIVE/PAPER/NO_TRADE → PostgreSQL journal → automatic simulated outcome tracking → human review.
+Read `docs/ARCHITECTURE.md` for the feature/data architecture and future ML path.
 
 ## Implemented
-- FastAPI backend and Nifty 200 daily scanner
-- EMA20 / DMA50 / DMA200 trend filter, consolidation breakout, volume, liquidity, ATR stop and targets
-- Configurable earnings/company-event exclusion with manual CSV fallback
-- PostgreSQL/SQLAlchemy experiment journal with idempotent scan snapshots
-- Automatic tracking for saved LIVE/PAPER signals using subsequent daily OHLC data
-- Simulated entry, stop, Target 1, time exit, MAE, MFE, R multiple, holding sessions and P&L
-- PAPER and simulated-LIVE summary metrics
-- Manual actual-trade outcome fields remain separate from simulated results
-- No broker auto-trading
+- Strict long-only Nifty 200 breakout scanner with hard trend/consolidation/breakout gates.
+- Opening-gap, volume, ATR stop, minimum R:R and turnover/liquidity checks.
+- Relative strength against Nifty 50; Nifty 200 breadth and industry leadership.
+- Earnings/company-event exclusion with conservative missing-data policy.
+- PostgreSQL journal with idempotent snapshots and automatic PAPER/simulated-LIVE outcome tracking.
+- Performance metrics including profit factor, average R, drawdown and losing streaks.
+- Walk-forward technical-core backtest with configurable transaction-cost/slippage bps.
+- OpenAI current-web intelligence adapter for the top shortlist only. It cannot override deterministic risk rules.
+- Zerodha Kite **read-only** client; no order-placement methods exist in V1.
+- Nifty 50 + Nifty 200 live benchmark snapshot path through Zerodha.
+- Telegram notification adapter, local Windows post-market runner, and polished Next.js dashboard.
 
-## PostgreSQL
-```bash
+## Start locally on Windows
+```powershell
+# database
 docker compose up -d postgres
-```
-Default URL: `postgresql+psycopg://swing:swing@localhost:5432/swing_trading`
 
-## Run backend
-```bash
+# backend
 cd backend
 python -m venv .venv
-# Windows: .venv\Scripts\activate
-# macOS/Linux: source .venv/bin/activate
+.venv\Scripts\activate
 pip install -r requirements.txt
 uvicorn app.main:app --reload
-```
-Open `http://127.0.0.1:8000/docs`.
 
-## Daily scan
+# separate terminal: frontend
+cd frontend
+npm install
+npm run dev
+```
+API docs: `http://127.0.0.1:8000/docs` · Dashboard: `http://localhost:3000`
+
+## Main API routes
 ```text
-GET /scan/nifty200?capital=1000&max_rupee_risk=10&limit=20
-```
-The scan journals the full evaluated snapshot. With `AUTO_REFRESH_OUTCOMES=true` it also refreshes older non-terminal LIVE/PAPER simulations in the same request.
-
-## Automatic outcome model
-Defaults are configurable in `.env.example`:
-- Entry is considered only from the first session after the signal, avoiding same-close lookahead.
-- Entry zone remains valid for 3 post-signal sessions.
-- If price gaps above the entry zone and never trades back into it, the system does not chase.
-- Target 1 is the deterministic full simulated exit because no partial-exit rule has been defined yet.
-- Maximum holding period is 20 trading sessions; otherwise exit at that session's close.
-- If a daily candle touches both stop and target, stop is assumed first (pessimistic handling of unknown intraday order).
-- An intraday-triggered entry receives no same-bar target credit.
-- Simulated outcomes never overwrite manually entered actual LIVE fills.
-
-Simulation statuses include `PENDING_ENTRY`, `OPEN`, `TARGET1`, `STOPPED`, `TIME_EXIT`, `ENTRY_EXPIRED`, and `NO_DATA`.
-
-## Outcome API
-```text
-POST /outcomes/refresh
-GET  /outcomes/simulations?classification=PAPER
-GET  /outcomes/summary
-```
-`/outcomes/summary` reports tracked/closed/open counts, entry expiries, wins/losses, win rate, simulated P&L, average return, average R and profit factor separately for PAPER and simulated LIVE signals.
-
-Existing journal endpoints remain available:
-```text
-GET   /journal/runs
-GET   /journal/signals
-PATCH /journal/signals/{signal_id}/outcome
-GET   /journal/comparison
+GET/POST /scan/nifty200
+GET      /dashboard/overview
+GET      /performance
+GET      /backtest/{symbol}
+POST     /outcomes/refresh
+GET      /outcomes/simulations
+GET      /outcomes/summary
+GET      /intelligence/latest
+GET      /benchmarks/snapshot
+GET      /broker/status
+GET      /broker/holdings
+GET      /broker/positions
+GET      /journal/runs
+GET      /journal/signals
+PATCH    /journal/signals/{signal_id}/outcome
 ```
 
-## Tests
-```bash
-cd backend
-pytest -q
+## Automatic weekday scan
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\install_windows_task.ps1 -ProjectRoot "C:\path\to\ai-swing-trading-india"
 ```
-Outcome tests cover next-session fills, no-chase entry expiry, pessimistic same-bar handling, time exits, persistence and paper summary calculations.
+Default task time is 4:15 PM Monday–Friday. It scans, journals, refreshes outcomes, runs news enrichment when configured, and sends Telegram when configured. It **does not place broker orders**.
 
-## Important
-This is research/education software, not financial advice and not a promise of profit. The automatic results are daily-bar simulations, not actual broker fills. yfinance is still a research adapter. Transaction costs, slippage, taxes/charges, corporate actions, exchange holiday calendars and licensed market/event data should be incorporated before treating results as evidence of a repeatable edge.
+## Dependencies you can provide later
+Nothing here blocks continued local development. Optional features activate when configured in `.env`:
+1. Zerodha Kite Connect: `KITE_API_KEY` and current `KITE_ACCESS_TOKEN` for read-only broker/benchmark data.
+2. OpenAI API: `OPENAI_API_KEY` for sourced current-news intelligence. Keep it server-side only.
+3. Telegram: `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`.
+4. A licensed/official timestamped historical news/event source is still needed before news/event features can be honestly historical-backtested without look-ahead bias.
+
+Never commit secrets to GitHub. `.env` is gitignored.
+
+## Backtesting warning
+The current backtest tests the deterministic technical core walk-forward. It deliberately does not pretend to know historical news/earnings when a timestamped archive is unavailable. Cost/slippage bps are configurable approximations and should later be calibrated against actual Zerodha contract notes.
+
+## Research rules
+Initial live capital ₹1,000; maximum one live position; ₹10 max planned risk; minimum score 80; minimum R:R 1:2; delivery only; no leverage; no F&O; no averaging down; human approval required. Scale only after enough clean out-of-sample evidence.
