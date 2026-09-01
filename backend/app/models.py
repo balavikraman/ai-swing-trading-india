@@ -45,6 +45,7 @@ class CandidateInput(BaseModel):
     liquid: bool = True
     gap_pct_above_breakout: float = Field(default=0, ge=0)
     market_regime: MarketRegime = MarketRegime.NEUTRAL
+    market_breadth_score: float = Field(default=0.5, ge=0, le=1)
 
 
 class ExperimentConfig(BaseModel):
@@ -57,6 +58,9 @@ class ExperimentConfig(BaseModel):
     event_days_before: int = Field(default=3, ge=0, le=30)
     event_days_after: int = Field(default=1, ge=0, le=30)
     event_unknown_blocks_trade: bool = True
+    require_strict_trend: bool = True
+    require_confirmed_breakout: bool = True
+    require_consolidation: bool = True
 
 
 class TradeProposal(BaseModel):
