@@ -9,6 +9,7 @@ from ..scoring import combine_scores, fundamental_score, governance_score, valua
 from ..schemas import AnalysisReport, ScoreComponent
 from ..technical import analyze_technicals
 from ..valuation import build_entry_plan, build_scenarios
+from .financials import enrich_quarterlies, forensic_checks
 from .news import classify_news, research_score
 
 
@@ -32,13 +33,17 @@ class StockAnalyzer:
             metrics = provider.company_snapshot(symbol)
             history = provider.price_history(symbol)
             annuals = provider.annual_financials(symbol)
-            quarterlies = provider.quarterly_financials(symbol)
+            quarterlies = enrich_quarterlies(provider.quarterly_financials(symbol))
             news = provider.news(symbol, metrics.get("company_name") or symbol)
         except Exception as exc:
             if self.settings.data_provider.lower() == "auto":
                 provider = DemoProvider()
                 source_errors.append(f"Live provider failed: {type(exc).__name__}. Demo fallback used.")
-                metrics = provider.company_snapshot(symbol); history = provider.price_history(symbol); annuals = provider.annual_financials(symbol); quarterlies = provider.quarterly_financials(symbol); news = provider.news(symbol, metrics.get("company_name") or symbol)
+                metrics = provider.company_snapshot(symbol)
+                history = provider.price_history(symbol)
+                annuals = provider.annual_financials(symbol)
+                quarterlies = enrich_quarterlies(provider.quarterly_financials(symbol))
+                news = provider.news(symbol, metrics.get("company_name") or symbol)
             else:
                 raise
 
@@ -47,6 +52,7 @@ class StockAnalyzer:
         if metrics.get("market_cap") and metrics.get("fcf"):
             metrics["fcf_yield"] = round(float(metrics["fcf"]) / float(metrics["market_cap"]) * 100, 2)
 
+        forensic = forensic_checks(annuals, metrics)
         technical = analyze_technicals(history)
         fundamental = fundamental_score(metrics, annuals, metrics.get("sector"))
         metrics.update(fundamental.get("growth", {}))
@@ -65,7 +71,8 @@ class StockAnalyzer:
             "governance": ScoreComponent(score=governance.get("score"), confidence=governance.get("confidence", 0), label="Governance", explanation="Missing governance evidence lowers confidence instead of being guessed."),
             "research": ScoreComponent(score=research.get("score"), confidence=research.get("confidence", 0), label="Current news & external context", explanation=research.get("explanation", "")),
         }
-        return AnalysisReport(symbol=symbol, company_name=metrics.get("company_name") or symbol, sector=metrics.get("sector"), industry=metrics.get("industry"), as_of=datetime.now(timezone.utc), price=metrics.get("price"), currency=metrics.get("currency") or "INR", scores=score_models, overall_score=combined["score"], overall_confidence=combined["confidence"], verdict=verdict, action_summary=summary, metrics=metrics, annuals=annuals, quarterlies=quarterlies, technicals=technical, price_history=history[-500:], entry_plan=entry, scenarios=scenarios, news=classified_news, risks=self._risks(metrics, technical, classified_news, source_errors), catalysts=self._catalysts(metrics, fundamental, classified_news), data_quality={"provider": provider.name, "live_data": provider.name != "demo", "fundamental_confidence": fundamental.get("confidence"), "valuation_confidence": valuation.get("confidence"), "technical_confidence": technical.get("confidence"), "research_confidence": research.get("confidence"), "source_warnings": source_errors}, disclaimers=["Decision-support tool, not a profit guarantee or personalized regulated investment advice.", "Low-confidence or missing data must be reviewed before capital is committed.", "Entry zones are risk-management ranges, not predictions of exact bottoms or tops."])
+        risks = self._risks(metrics, technical, classified_news, source_errors) + [f["message"] for f in forensic["flags"] if f["severity"] in ("high", "medium")]
+        return AnalysisReport(symbol=symbol, company_name=metrics.get("company_name") or symbol, sector=metrics.get("sector"), industry=metrics.get("industry"), as_of=datetime.now(timezone.utc), price=metrics.get("price"), currency=metrics.get("currency") or "INR", scores=score_models, overall_score=combined["score"], overall_confidence=combined["confidence"], verdict=verdict, action_summary=summary, metrics=metrics, annuals=annuals, quarterlies=quarterlies, technicals=technical, price_history=history[-500:], entry_plan=entry, scenarios=scenarios, news=classified_news, risks=risks, catalysts=self._catalysts(metrics, fundamental, classified_news), data_quality={"provider": provider.name, "live_data": provider.name != "demo", "fundamental_confidence": fundamental.get("confidence"), "valuation_confidence": valuation.get("confidence"), "technical_confidence": technical.get("confidence"), "research_confidence": research.get("confidence"), "source_warnings": source_errors, "forensic_score": forensic["score"], "forensic_flags": forensic["flags"]}, disclaimers=["Decision-support tool, not a profit guarantee or personalized regulated investment advice.", "Low-confidence or missing data must be reviewed before capital is committed.", "Entry zones are risk-management ranges, not predictions of exact bottoms or tops."])
 
     @staticmethod
     def _verdict(score: float | None, conf: float, valuation: float | None, technical: float | None) -> tuple[str, str]:
