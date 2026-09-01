@@ -1,43 +1,80 @@
-# Stock Analyzer v0.1 — Local UI Prototype
+# Stock Analyzer — local-first investment intelligence
 
-This first build is intentionally **demo-data only**. Its purpose is to review the report UX before wiring real fundamentals, current news, Zerodha holdings and PostgreSQL.
+A beginner-friendly but auditable stock-analysis application for long-term compounding plus a smaller tactical/swing workflow. It is designed to answer four questions:
 
-## Run on Windows
+1. **Should I own this business?**
+2. **Is the current valuation sensible?**
+3. **Is this a reasonable entry/accumulation point?**
+4. **What would make me reduce or exit?**
 
-1. Install Python 3.12 or newer.
-2. Double-click `setup.bat` once.
-3. Double-click `Stock Analyzer.bat` whenever you want to run it.
-4. The browser opens at `http://127.0.0.1:8765`.
+> The system is decision support, not a profit guarantee. Missing evidence lowers confidence instead of being silently guessed.
 
-## Current build
+## Implemented in V0.3
 
-- Polished stock-report overview
-- Overall opportunity score
-- Beginner-friendly metric explanations
-- Entry / accumulate / strong-accumulate / hold / do-not-chase / profit zones
-- Thesis-break rule
-- 8-part scorecard
-- 5-year annual financial presentation
-- Quarterly trend presentation
-- Current-news classification UI
-- Bear/base/bull valuation presentation
-- Responsive mobile/desktop layout
-- FastAPI backend scaffold
-- Service-module architecture for the real analyzer
+- Polished local dashboard and deep stock report
+- Annual and quarterly financial tables
+- Fundamental quality scoring with confidence weighting
+- Valuation scoring with sector-aware handling
+- Technical engine: 20/50/100/200-day averages, RSI, MACD, ATR, support/resistance, 52-week drawdown
+- Staged entry / accumulation / do-not-chase / partial-profit review ranges
+- Transparent bear/base/bull EPS-multiple scenario model
+- Current-provider news ingestion + conservative triage
+- Risk/catalyst and value-trap oriented reporting
+- Data-quality/confidence layer
+- PostgreSQL support with SQLite first-run fallback
+- Local investment journal and analysis snapshots
+- Opportunity scanner for a configurable watchlist
+- Zerodha **read-only** login/holdings integration; no order methods are implemented
+- Demo mode for validation when external data is unavailable
+- Automated tests for scoring, confidence and technical calculations
 
-## Next wiring order
+## Windows quick start
 
-1. PostgreSQL schema + migrations
-2. Stock/security master
-3. Real annual and quarterly financial ingestion
-4. Valuation calculations
-5. Technical/chart calculations
-6. Company + international news research pipeline
-7. Governance/value-trap checks
-8. Zerodha read-only portfolio connection
-9. Portfolio-fit / position sizing
-10. Journal + historical validation/backtesting
+1. Install **Python 3.12+**.
+2. Open the `stock-analyzer` folder.
+3. Double-click `setup.cmd` once.
+4. Double-click `start.cmd` whenever you want to use the analyzer.
+5. Browser opens at `http://127.0.0.1:8765`.
 
-## Important
+The first run can use SQLite automatically. PostgreSQL is recommended for the permanent portfolio database.
 
-Never put Zerodha passwords/PIN in this app. Only Kite API credentials belong in `.env`, and `.env` must never be committed to GitHub.
+## Data modes
+
+`DATA_PROVIDER=auto` tries the external provider first and falls back to clearly labelled demo data if unavailable. `DATA_PROVIDER=yfinance` fails loudly instead of falling back. `DATA_PROVIDER=demo` is for UI/testing only.
+
+NSE symbols generally use `.NS`, e.g. `INFY.NS`, `TCS.NS`, `HDFCBANK.NS`.
+
+## Zerodha read-only integration
+
+Set your API key and secret only in the local `.env`. Tokens are stored under `.runtime/`, which is gitignored. The code intentionally exposes holdings/positions/margins only; it contains no order-placement methods.
+
+## Score design
+
+Default overall weighting:
+
+- Fundamentals: 34%
+- Valuation: 22%
+- Technical/entry timing: 16%
+- Governance: 10%
+- Current research/news: 18%
+
+Each component is multiplied by its evidence confidence. Missing data reduces influence instead of creating false precision.
+
+## Validation rule
+
+A valid historical fundamental backtest needs **point-in-time financial data** to avoid look-ahead bias. This project will not claim a valid backtest using today's revised fundamentals. It stores every analysis snapshot and investment thesis so future 1/3/6/12-month outcomes can be measured honestly.
+
+## API
+
+- `GET /api/health`
+- `GET /api/analyze/{symbol}`
+- `GET /api/scan`
+- `GET/POST /api/journal`
+- `GET /api/portfolio`
+- `GET /api/zerodha/login`
+- `GET /api/zerodha/callback`
+- Interactive docs: `/api/docs`
+
+## Research limitation
+
+Deep current-affairs/global-news reasoning needs high-quality research sources. Automated news triage is intentionally low-confidence until official filing/news research adapters and the ChatGPT app/plugin layer are connected.
